@@ -1,30 +1,31 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 
+import 'package:q_pro/core/network/infrive_api.dart';
+import 'package:q_pro/core/storage/outbox_sync.dart';
 import 'package:q_pro/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  setUp(() {
+    // main.dart's _ConnectivityBanner reads OutboxSync.instance on every
+    // build; normally wired up in main(), which this test bypasses by
+    // pumping QProApp directly. The banner never calls out over the
+    // network just by rendering, so any InfriveApi/FrappeClient pair is
+    // fine here — nothing in it actually gets exercised.
+    OutboxSync.resetForTesting();
+    OutboxSync.init(
+      InfriveApi(FrappeClient('http://test.invalid/')),
+      FrappeClient('http://test.invalid/'),
+    );
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  testWidgets('Shows the login screen when not logged in', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const QProApp(startLoggedIn: false));
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.text('Q-Pro'), findsOneWidget);
+    expect(find.text('Welcome back'), findsOneWidget);
+    expect(find.text('Log In'), findsOneWidget);
   });
 }
