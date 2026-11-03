@@ -6,16 +6,16 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 
 import '../../../core/network/session.dart';
-import '../../../core/storage/outbox_db.dart';
 import '../../../core/storage/outbox_sync.dart';
 import '../../../core/theme/app_colors.dart';
-import '../../../core/utils/string_formatter.dart';
 import '../../../core/widgets/floating_bottom_nav_bar.dart';
 import '../../../core/widgets/scale_button.dart';
 import '../../../core/widgets/user_avatar.dart';
 import '../../auth/models/me.dart';
 import '../../drafts/presentation/drafts_page.dart';
 import '../../inbox/presentation/inbox_page.dart';
+import '../../notifications/notification_center.dart';
+import '../../notifications/presentation/notifications_page.dart';
 import '../../profile/presentation/profile_page.dart';
 import '../../projects/presentation/projects_page.dart';
 
@@ -33,7 +33,8 @@ class DashboardPage extends StatefulWidget {
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
-class _DashboardPageState extends State<DashboardPage> {
+class _DashboardPageState extends State<DashboardPage>
+    with WidgetsBindingObserver {
   Me? me;
 
   late Timer _timer;
@@ -45,6 +46,8 @@ class _DashboardPageState extends State<DashboardPage> {
   void initState() {
     super.initState();
     loadMe();
+    WidgetsBinding.instance.addObserver(this);
+    NotificationCenter.instance.startPolling();
     _scrollController.addListener(_onScroll);
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _now = DateTime.now());
@@ -53,10 +56,24 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    NotificationCenter.instance.stopPolling();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _timer.cancel();
     super.dispose();
+  }
+
+  /// A backgrounded app's timers don't fire, so the badge would be stale
+  /// the moment the user comes back. Re-check on resume, and don't keep a
+  /// timer alive while nobody can see the result.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      NotificationCenter.instance.startPolling();
+    } else if (state == AppLifecycleState.paused) {
+      NotificationCenter.instance.stopPolling();
+    }
   }
 
   void _onScroll() {
@@ -77,6 +94,23 @@ class _DashboardPageState extends State<DashboardPage> {
       // Keep showing the cached username from login; the Projects screen
       // will surface any real auth problem.
     }
+  }
+
+  Future<void> openNotifications() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const NotificationsPage()),
+    );
+    NotificationCenter.instance.refresh();
+  }
+
+  /// Anything that can change the count — approving from the Inbox,
+  /// submitting a form — lands back here, so re-check on return instead of
+  /// waiting out the poll interval.
+  Future<void> _pushAndRefresh(Widget page) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => page),
+    );
+    NotificationCenter.instance.refresh();
   }
 
   void openProfile() {
@@ -100,13 +134,6 @@ class _DashboardPageState extends State<DashboardPage> {
 
   String get _displayName => me?.fullName.isNotEmpty == true ? me!.fullName : widget.username;
 
-  String get _subtitle => switch (me) {
-        Me(isSuperadmin: true) => 'Signed in · Superadmin',
-        Me(isProjectAdmin: true) => 'Signed in · Project admin',
-        Me() => 'Signed in · ${me!.user}',
-        null => 'You are now inside Q-Pro.',
-      };
-
   String get _formattedTime => DateFormat('h:mm a').format(_now);
   String get _formattedDate => DateFormat('EEE, MMM d').format(_now).toUpperCase();
   String get _formattedFullDate => DateFormat('EEEE, d MMMM yyyy').format(_now);
@@ -123,170 +150,14 @@ class _DashboardPageState extends State<DashboardPage> {
         // Already home.
         break;
       case 3:
-        _openAlertsSheet();
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const DraftsPage()),
+        );
         break;
       case 4:
         openProfile();
         break;
     }
-  }
-
-  Future<void> _openAlertsSheet() async {
-    final all = await OutboxDatabase.instance.getAllDrafts();
-    final pending = all.where((d) => d['state'] != 'synced').toList()
-      ..sort((a, b) => (b['updated_at'] as int).compareTo(a['updated_at'] as int));
-
-    if (!mounted) return;
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (context) {
-        return Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-          ),
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFCBD5E1),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        'Site Alerts & Notifications',
-                        style: GoogleFonts.sora(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          color: const Color(0xFF0F172A),
-                        ),
-                      ),
-                      if (pending.isNotEmpty) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFFEF4444),
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              if (pending.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 24),
-                  child: Text(
-                    "You're all caught up — no pending alerts.",
-                    style: GoogleFonts.sora(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: const Color(0xFF64748B),
-                    ),
-                  ),
-                )
-              else
-                ...pending.map((draft) {
-                  final state = draft['state'] as String;
-                  final (label, color) = switch (state) {
-                    'attention' => ('Needs attention', const Color(0xFFC0392B)),
-                    'syncing' => ('Syncing', const Color(0xFF2563EB)),
-                    _ => ('Waiting to sync', const Color(0xFFD97706)),
-                  };
-
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF8FAFC),
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: const Color(0xFFE2E8F0)),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: color.withValues(alpha: 0.1),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(
-                              state == 'attention'
-                                  ? Icons.warning_amber_rounded
-                                  : Icons.pending_actions_rounded,
-                              color: color,
-                              size: 20,
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  draft['form'] as String,
-                                  style: GoogleFonts.sora(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: const Color(0xFF0F172A),
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  label,
-                                  style: GoogleFonts.ibmPlexMono(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w500,
-                                    color: const Color(0xFF64748B),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          Text(
-                            relativeTime(draft['updated_at'] as int),
-                            style: GoogleFonts.sora(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                              color: const Color(0xFF94A3B8),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                }),
-              const SizedBox(height: 16),
-            ],
-          ),
-        );
-      },
-    );
   }
 
   @override
@@ -319,6 +190,7 @@ class _DashboardPageState extends State<DashboardPage> {
       bottomNavigationBar: FloatingBottomNavBar(
         currentIndex: 2,
         onTap: _handleNavTap,
+        badges: {3: OutboxSync.instance.pendingCount},
       ),
     );
   }
@@ -450,10 +322,15 @@ class _DashboardPageState extends State<DashboardPage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         ScaleButton(
                           onTap: openProfile,
                           child: UserAvatar(radius: 20, initials: initials),
+                        ),
+                        ScaleButton(
+                          onTap: openNotifications,
+                          child: _buildNotificationBell(),
                         ),
                       ],
                     ),
@@ -475,15 +352,6 @@ class _DashboardPageState extends State<DashboardPage> {
                         fontWeight: FontWeight.w800,
                         color: const Color(0xFF0F172A),
                         letterSpacing: -0.5,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _subtitle,
-                      style: GoogleFonts.sora(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: const Color(0xFF64748B),
                       ),
                     ),
                     const SizedBox(height: 14),
@@ -731,14 +599,70 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  /// Bell in the header: *what happened* to the user's submissions.
+  /// Deliberately distinct from the Inbox tile below, which is *what still
+  /// needs them* — before this the two were the same screen behind two
+  /// different entry points.
+  Widget _buildNotificationBell() {
+    return ValueListenableBuilder<int>(
+      valueListenable: NotificationCenter.instance.unreadCount,
+      builder: (context, unread, _) {
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.45),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white.withValues(alpha: 0.7)),
+              ),
+              child: Icon(
+                unread > 0
+                    ? Icons.notifications_active_rounded
+                    : Icons.notifications_none_rounded,
+                size: 20,
+                color: const Color(0xFF0F172A),
+              ),
+            ),
+            if (unread > 0)
+              Positioned(
+                top: -2,
+                right: -2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  constraints: const BoxConstraints(minWidth: 18),
+                  decoration: BoxDecoration(
+                    color: AppColors.orange,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                  child: Text(
+                    unread > 99 ? '99+' : '$unread',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.sora(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      height: 1.2,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
   // Mirrors the real destinations this app has today (Projects, Inbox,
-  // Drafts, Profile) plus still-placeholder modules (Forms, My Dashboard).
+  // Drafts, Profile) plus a still-placeholder module (Forms).
   // Log Out lives on the Profile screen now, not as its own tile here.
   Widget _buildQuickActionGrid(BuildContext context) {
     final actions = [
       _QuickActionData(
-        title: 'Projects',
-        subtitle: 'View projects from your backend',
+        title: 'My Dashboard',
+        subtitle: 'View projects from ',
         icon: Icons.folder_outlined,
         color: const Color(0xFF2563EB),
         gradient: AppColors.gradientBlue,
@@ -752,20 +676,7 @@ class _DashboardPageState extends State<DashboardPage> {
         icon: Icons.inbox_outlined,
         color: const Color(0xFF0284C7),
         gradient: AppColors.gradientBlue,
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const InboxPage()),
-        ),
-      ),
-      _QuickActionData(
-        title: 'Drafts',
-        subtitle: 'Offline drafts and sync status',
-        icon: Icons.pending_actions_outlined,
-        color: const Color(0xFFD97706),
-        gradient: AppColors.gradientOrange,
-        showPendingBadge: true,
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const DraftsPage()),
-        ),
+        onTap: () => _pushAndRefresh(const InboxPage()),
       ),
       _QuickActionData(
         title: 'Forms',
@@ -774,22 +685,6 @@ class _DashboardPageState extends State<DashboardPage> {
         color: const Color(0xFF7C3AED),
         gradient: AppColors.gradientPurple,
         onTap: () => _comingSoon('Forms'),
-      ),
-      _QuickActionData(
-        title: 'Profile',
-        subtitle: 'Manage your account',
-        icon: Icons.person_outline,
-        color: const Color(0xFF1A3A5C),
-        gradient: AppColors.gradientNavy,
-        onTap: openProfile,
-      ),
-      _QuickActionData(
-        title: 'My Dashboard',
-        subtitle: 'Your personal overview',
-        icon: Icons.space_dashboard_outlined,
-        color: const Color(0xFF14B8A6),
-        gradient: AppColors.gradientEmerald,
-        onTap: () => _comingSoon('My Dashboard'),
       ),
     ];
 
@@ -839,50 +734,18 @@ class _DashboardPageState extends State<DashboardPage> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: action.gradient,
-                              ),
-                              shape: BoxShape.circle,
-                              boxShadow: AppColors.glowMedium(action.color),
-                            ),
-                            child: Icon(action.icon, color: Colors.white, size: 24),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: action.gradient,
                           ),
-                          if (action.showPendingBadge)
-                            Positioned(
-                              right: -4,
-                              top: -4,
-                              child: ValueListenableBuilder<int>(
-                                valueListenable: OutboxSync.instance.pendingCount,
-                                builder: (context, pending, _) {
-                                  if (pending == 0) return const SizedBox.shrink();
-                                  return Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: AppColors.red,
-                                      borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(color: Colors.white, width: 1.5),
-                                    ),
-                                    child: Text(
-                                      '$pending',
-                                      style: GoogleFonts.sora(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w700,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                        ],
+                          shape: BoxShape.circle,
+                          boxShadow: AppColors.glowMedium(action.color),
+                        ),
+                        child: Icon(action.icon, color: Colors.white, size: 24),
                       ),
                       const SizedBox(height: 10),
                       Text(
@@ -990,7 +853,6 @@ class _QuickActionData {
   final Color color;
   final List<Color> gradient;
   final VoidCallback onTap;
-  final bool showPendingBadge;
 
   const _QuickActionData({
     required this.title,
@@ -999,6 +861,5 @@ class _QuickActionData {
     required this.color,
     required this.gradient,
     required this.onTap,
-    this.showPendingBadge = false,
   });
 }

@@ -1,7 +1,9 @@
 import 'dart:ui';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../theme/app_colors.dart';
 import 'scale_button.dart';
 
 /// Floating frosted-glass pill nav bar. Purely presentational — the caller
@@ -11,10 +13,16 @@ class FloatingBottomNavBar extends StatelessWidget {
   final int currentIndex;
   final ValueChanged<int> onTap;
 
+  /// Optional live count badge per item index — the caller owns the
+  /// listenable, so this widget stays presentational. A count of 0 hides
+  /// the badge.
+  final Map<int, ValueListenable<int>> badges;
+
   const FloatingBottomNavBar({
     super.key,
     required this.currentIndex,
     required this.onTap,
+    this.badges = const {},
   });
 
   static const _navItems = [
@@ -34,9 +42,9 @@ class FloatingBottomNavBar extends StatelessWidget {
       label: 'Home',
     ),
     _NavItemData(
-      icon: Icons.notifications_none_rounded,
-      activeIcon: Icons.notifications_rounded,
-      label: 'Alerts',
+      icon: Icons.pending_actions_outlined,
+      activeIcon: Icons.pending_actions_rounded,
+      label: 'Drafts',
     ),
     _NavItemData(
       icon: Icons.person_outline_rounded,
@@ -118,16 +126,29 @@ class FloatingBottomNavBar extends StatelessWidget {
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  AnimatedSwitcher(
-                                    duration: const Duration(milliseconds: 250),
-                                    transitionBuilder: (child, animation) =>
-                                        ScaleTransition(scale: animation, child: child),
-                                    child: Icon(
-                                      isSelected ? item.activeIcon : item.icon,
-                                      key: ValueKey('${item.label}_$isSelected'),
-                                      color: isSelected ? Colors.white : const Color(0xFF475569),
-                                      size: 22,
-                                    ),
+                                  Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      AnimatedSwitcher(
+                                        duration: const Duration(milliseconds: 250),
+                                        transitionBuilder: (child, animation) =>
+                                            ScaleTransition(scale: animation, child: child),
+                                        child: Icon(
+                                          isSelected ? item.activeIcon : item.icon,
+                                          key: ValueKey('${item.label}_$isSelected'),
+                                          color: isSelected
+                                              ? Colors.white
+                                              : const Color(0xFF475569),
+                                          size: 22,
+                                        ),
+                                      ),
+                                      if (badges[index] != null)
+                                        Positioned(
+                                          right: -6,
+                                          top: -5,
+                                          child: _CountBadge(count: badges[index]!),
+                                        ),
+                                    ],
                                   ),
                                   AnimatedOpacity(
                                     duration: const Duration(milliseconds: 300),
@@ -169,6 +190,41 @@ class FloatingBottomNavBar extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Small red count pill that rides on a nav icon's top-right corner.
+class _CountBadge extends StatelessWidget {
+  final ValueListenable<int> count;
+
+  const _CountBadge({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: count,
+      builder: (context, value, _) {
+        if (value == 0) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+          constraints: const BoxConstraints(minWidth: 16),
+          decoration: BoxDecoration(
+            color: AppColors.red,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.white, width: 1.5),
+          ),
+          child: Text(
+            value > 99 ? '99+' : '$value',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.sora(
+              fontSize: 9,
+              fontWeight: FontWeight.w800,
+              color: Colors.white,
+            ),
+          ),
+        );
+      },
     );
   }
 }

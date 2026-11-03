@@ -193,6 +193,9 @@ class OutboxSync {
               // Local file is gone (e.g. OS reclaimed cache); nothing to
               // retry — drop the job and leave the answer as it was.
               await _db.deleteJob(id);
+              if (!await _db.hasPendingJobs(draftLocalId)) {
+                await _db.markDraftSynced(draftLocalId);
+              }
               return _JobOutcome.handled;
             }
 
@@ -220,10 +223,18 @@ class OutboxSync {
         case 'submit':
           if (serverName == null) return _JobOutcome.deferred;
           await _api.submit(serverName, answers: answers);
-          await _db.setDraftState(draftLocalId, 'synced');
+          await _db.setDraftState(draftLocalId, OutboxDatabase.syncedState);
       }
 
       await _db.deleteJob(id);
+      // That was the draft's last queued job, so everything the device
+      // was holding for it is now on the server. Stamp it done rather
+      // than letting it vanish from the Drafts screen the moment the
+      // queue empties — the user gets a visible "Synced" receipt to
+      // clear themselves.
+      if (!await _db.hasPendingJobs(draftLocalId)) {
+        await _db.markDraftSynced(draftLocalId);
+      }
       return _JobOutcome.handled;
     } catch (error) {
       if (error is AuthException && error.statusCode == 401) {

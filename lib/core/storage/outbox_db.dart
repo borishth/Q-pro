@@ -19,6 +19,14 @@ class OutboxDatabase {
   OutboxDatabase._();
   static final OutboxDatabase instance = OutboxDatabase._();
 
+  /// `drafts.state` of a form that's been started but never saved or
+  /// submitted — kept off the Drafts screen and out of the pending count.
+  static const scratchState = 'scratch';
+
+  /// `drafts.state` of a draft that's been submitted — not merely saved.
+  /// Reopening one can't submit again; the form screen says so.
+  static const syncedState = 'synced';
+
   Database? _db;
 
   Future<Database> get _database async => _db ??= await _open();
@@ -27,7 +35,7 @@ class OutboxDatabase {
     final path = await getDatabasesPath();
     return openDatabase(
       '$path/q_pro_outbox.db',
-      version: 3,
+      version: 4,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -43,7 +51,8 @@ class OutboxDatabase {
         answers_json TEXT NOT NULL,
         state TEXT NOT NULL,
         error TEXT,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        synced_at INTEGER
       )
     ''');
     await db.execute('''
@@ -74,6 +83,9 @@ class OutboxDatabase {
     if (oldVersion < 3) {
       await db.execute('ALTER TABLE outbox ADD COLUMN result TEXT');
     }
+    if (oldVersion < 4) {
+      await db.execute('ALTER TABLE drafts ADD COLUMN synced_at INTEGER');
+    }
   }
 
   /// Opens a database with this class's exact schema via [factory] at
@@ -88,7 +100,7 @@ class OutboxDatabase {
     return factory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 3,
+        version: 4,
         onCreate: _onCreate,
         onUpgrade: _onUpgrade,
       ),
@@ -104,12 +116,17 @@ class OutboxDatabase {
 
   // ---- drafts
 
+  /// [state] is `local` for a draft that's headed to the server, or
+  /// [scratchState] for a form the user has opened and started filling but
+  /// not yet saved or submitted — it lives only on the device, and is
+  /// handed back by [getScratchDraft] the next time that form is opened.
   Future<void> insertDraft({
     required String localId,
     String? serverName,
     required String form,
     String? stage,
     required Map<String, dynamic> answers,
+    String state = 'local',
   }) async {
     final db = await _database;
     await db.insert('drafts', {
@@ -118,10 +135,27 @@ class OutboxDatabase {
       'form': form,
       'stage': stage,
       'answers_json': jsonEncode(answers),
-      'state': 'local',
+      'state': state,
       'error': null,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
+      'synced_at': null,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// The unsaved in-progress fill for [form] on [stage], if the user left
+  /// one behind — null when nothing is waiting.
+  Future<Map<String, dynamic>?> getScratchDraft(String form, String? stage) async {
+    final db = await _database;
+    final rows = await db.query(
+      'drafts',
+      where: stage == null
+          ? 'state = ? AND form = ? AND stage IS NULL'
+          : 'state = ? AND form = ? AND stage = ?',
+      whereArgs: [scratchState, form, ?stage],
+      orderBy: 'updated_at DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
   }
 
   Future<Map<String, dynamic>?> getDraft(String localId) async {
@@ -171,22 +205,68 @@ class OutboxDatabase {
     );
   }
 
-  /// Drafts that actually need the Drafts screen's attention: either
-  /// stuck (`attention`) or still have a job queued against them.
+  /// Drafts the Drafts screen shows: stuck (`attention`), still carrying
+  /// a queued job, or already pushed by the outbox and kept as a done
+  /// receipt until the user clears it ([markDraftSynced]).
   ///
-  /// Every draft gets a local mirror row the moment it's created — even
-  /// one that's fully handled online via the direct `DraftSaver`/`submit`
-  /// path and never touches the outbox — so filtering on `state` alone
-  /// would wrongly list already-synced online drafts as "waiting to
-  /// sync" forever. Requiring either `attention` or a live outbox row
-  /// is what actually means "this needs the user to look at it."
+  /// Every draft keeps a local row — even one saved or submitted straight
+  /// to the server without ever touching the outbox — so filtering on
+  /// `state` alone would wrongly list already-synced online drafts as
+  /// "waiting to sync" forever. A draft that never went through the queue
+  /// has no `synced_at` stamp, so it stays off the screen entirely. A
+  /// `scratch` fill was never saved, so it's never listed either.
   Future<List<Map<String, dynamic>>> getAllDrafts() async {
     final db = await _database;
     return db.rawQuery('''
       SELECT DISTINCT d.* FROM drafts d
-      WHERE d.state = 'attention'
-         OR EXISTS (SELECT 1 FROM outbox o WHERE o.draft_local_id = d.local_id)
+      WHERE d.state != '$scratchState'
+        AND (d.state = 'attention'
+         OR d.synced_at IS NOT NULL
+         OR EXISTS (SELECT 1 FROM outbox o WHERE o.draft_local_id = d.local_id))
       ORDER BY d.updated_at DESC
+    ''');
+  }
+
+  /// Stamps a draft as finished syncing: the outbox has drained its last
+  /// job without an error. The row deliberately stays behind so the
+  /// Drafts screen can show it as done — rather than silently dropping it
+  /// off the list the moment the queue empties, which gave no
+  /// confirmation that anything had actually gone through. Queueing
+  /// anything new for the draft clears the stamp again.
+  ///
+  /// Deliberately leaves `state` alone: a drained queue means "the device
+  /// has nothing left to push", which is not the same as [syncedState]
+  /// ("submitted") — an offline Save Draft drains with nothing submitted.
+  Future<void> markDraftSynced(String localId) async {
+    final db = await _database;
+    await db.update(
+      'drafts',
+      {'error': null, 'synced_at': DateTime.now().millisecondsSinceEpoch},
+      where: 'local_id = ?',
+      whereArgs: [localId],
+    );
+  }
+
+  /// Drops the "done" stamp so a draft that's been given fresh work to do
+  /// reads as pending again instead of still showing as synced.
+  Future<void> _clearSyncedMark(DatabaseExecutor db, String localId) async {
+    await db.update(
+      'drafts',
+      {'synced_at': null},
+      where: 'local_id = ? AND synced_at IS NOT NULL',
+      whereArgs: [localId],
+    );
+  }
+
+  /// Forgets every already-synced draft in one go — the Drafts screen's
+  /// "Clear synced" action. Only touches rows with nothing left queued,
+  /// so a draft that's been edited again since is left alone.
+  Future<int> clearSyncedDrafts() async {
+    final db = await _database;
+    return db.rawDelete('''
+      DELETE FROM drafts
+      WHERE synced_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.draft_local_id = local_id)
     ''');
   }
 
@@ -231,6 +311,49 @@ class OutboxDatabase {
       'attempts': 0,
       'last_error': null,
     });
+    await _clearSyncedMark(db, draftLocalId);
+  }
+
+  /// Queues a `save` for [draftLocalId] and moves any `upload` jobs already
+  /// waiting on it to the back of the queue, so the draft's `save` always
+  /// runs first. A photo picked while the form was still unsaved was queued
+  /// before any `save` existed; left in place it would run (and defer) ahead
+  /// of the `save` it depends on, and a later `submit` could overtake it.
+  Future<void> enqueueSaveAheadOfUploads(String draftLocalId) async {
+    final db = await _database;
+    await db.transaction((txn) async {
+      final hasSave = (await txn.query(
+        'outbox',
+        where: "kind = 'save' AND draft_local_id = ?",
+        whereArgs: [draftLocalId],
+      ))
+          .isNotEmpty;
+      if (!hasSave) {
+        await txn.insert('outbox', {
+          'kind': 'save',
+          'draft_local_id': draftLocalId,
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+          'attempts': 0,
+          'last_error': null,
+        });
+      }
+
+      final uploads = await txn.query(
+        'outbox',
+        where: "kind = 'upload' AND draft_local_id = ?",
+        whereArgs: [draftLocalId],
+        orderBy: 'id ASC',
+      );
+      for (final upload in uploads) {
+        await txn.delete('outbox', where: 'id = ?', whereArgs: [upload['id']]);
+        await txn.insert('outbox', {
+          for (final e in upload.entries)
+            if (e.key != 'id') e.key: e.value,
+        });
+      }
+
+      await _clearSyncedMark(txn, draftLocalId);
+    });
   }
 
   /// Queues an `upload` job for [questionId] on [draftLocalId], replacing
@@ -255,6 +378,7 @@ class OutboxDatabase {
       'attempts': 0,
       'last_error': null,
     });
+    await _clearSyncedMark(db, draftLocalId);
   }
 
   Future<List<Map<String, dynamic>>> pendingJobs() async {
@@ -308,6 +432,20 @@ class OutboxDatabase {
     );
   }
 
+  /// Whether anything is still queued against [draftLocalId] — the
+  /// outbox asks after finishing a job to decide if the draft is done.
+  Future<bool> hasPendingJobs(String draftLocalId) async {
+    final db = await _database;
+    final rows = await db.query(
+      'outbox',
+      columns: ['id'],
+      where: 'draft_local_id = ?',
+      whereArgs: [draftLocalId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
   Future<void> deleteJob(int id) async {
     final db = await _database;
     await db.delete('outbox', where: 'id = ?', whereArgs: [id]);
@@ -339,7 +477,11 @@ class OutboxDatabase {
 
   Future<int> countPending() async {
     final db = await _database;
-    final result = await db.rawQuery('SELECT COUNT(*) AS c FROM outbox');
+    final result = await db.rawQuery('''
+      SELECT COUNT(*) AS c FROM outbox o
+      LEFT JOIN drafts d ON d.local_id = o.draft_local_id
+      WHERE d.state IS NULL OR d.state != '$scratchState'
+    ''');
     return (result.first['c'] as int?) ?? 0;
   }
 
@@ -378,7 +520,8 @@ class OutboxDatabase {
     final db = await _database;
     await db.delete(
       'cache',
-      where: "key = 'projects' OR key = 'inbox' OR key LIKE 'hierarchy:%' "
+      where: "key = 'projects' OR key = 'inbox' OR key = 'notifications' "
+          "OR key LIKE 'hierarchy:%' "
           "OR key LIKE 'stage:%' OR key LIKE 'submission:%' OR key LIKE 'submissions:%'",
     );
   }

@@ -111,7 +111,7 @@ void main() {
 
   group('getAllDrafts filtering', () {
     // Regression test for a real bug found during on-device testing: a
-    // draft handled entirely online (DraftSaver + direct submit, nothing
+    // draft handled entirely online (saved or submitted directly, nothing
     // ever queued) still got a local mirror row, and used to show up in
     // the Drafts screen forever as "waiting to sync".
     test('excludes a draft with no outbox jobs and state != attention', () async {
@@ -151,6 +151,20 @@ void main() {
 
       final drafts = await OutboxDatabase.instance.getAllDrafts();
       expect(drafts.map((d) => d['local_id']), contains('local-1'));
+    });
+
+    test('includes a synced draft so it reads as done until cleared', () async {
+      await OutboxDatabase.instance.insertDraft(
+        localId: 'local-1',
+        serverName: 'SUB-0001',
+        form: 'FORM-1',
+        answers: const {},
+      );
+      await OutboxDatabase.instance.markDraftSynced('local-1');
+
+      final drafts = await OutboxDatabase.instance.getAllDrafts();
+      expect(drafts.map((d) => d['local_id']), contains('local-1'));
+      expect(drafts.single['synced_at'], isNotNull);
     });
 
     test('orders by most recently updated first', () async {
@@ -220,6 +234,68 @@ void main() {
 
       expect(await OutboxDatabase.instance.getDraft('local-1'), isNull);
       expect(await OutboxDatabase.instance.jobsForDraft('local-1'), isEmpty);
+    });
+  });
+
+  group('clearing synced drafts', () {
+    Future<void> insertSynced(String localId) async {
+      await OutboxDatabase.instance.insertDraft(
+        localId: localId,
+        serverName: localId,
+        form: 'FORM-1',
+        answers: const {},
+      );
+      await OutboxDatabase.instance.markDraftSynced(localId);
+    }
+
+    test('clearSyncedDrafts removes every finished draft', () async {
+      await insertSynced('done-1');
+      await insertSynced('done-2');
+
+      expect(await OutboxDatabase.instance.clearSyncedDrafts(), 2);
+      expect(await OutboxDatabase.instance.getAllDrafts(), isEmpty);
+    });
+
+    test('clearSyncedDrafts leaves a draft that has work queued again', () async {
+      await insertSynced('done-1');
+      await OutboxDatabase.instance.enqueueIfAbsent('save', 'done-1');
+
+      expect(await OutboxDatabase.instance.clearSyncedDrafts(), 0);
+      expect(await OutboxDatabase.instance.getDraft('done-1'), isNotNull);
+    });
+
+    test('clearSyncedDrafts leaves pending and attention drafts alone', () async {
+      await OutboxDatabase.instance.insertDraft(
+        localId: 'stuck',
+        form: 'FORM-1',
+        answers: const {},
+      );
+      await OutboxDatabase.instance.setDraftState('stuck', 'attention', error: 'boom');
+      await OutboxDatabase.instance.insertDraft(
+        localId: 'queued',
+        form: 'FORM-1',
+        answers: const {},
+      );
+      await OutboxDatabase.instance.enqueueIfAbsent('save', 'queued');
+
+      expect(await OutboxDatabase.instance.clearSyncedDrafts(), 0);
+      expect(await OutboxDatabase.instance.getAllDrafts(), hasLength(2));
+    });
+
+    test('enqueueUpload on a synced draft makes it pending again', () async {
+      await insertSynced('done-1');
+      await OutboxDatabase.instance.enqueueUpload('done-1', 'q1', '/tmp/a.jpg');
+
+      final draft = await OutboxDatabase.instance.getDraft('done-1');
+      expect(draft!['synced_at'], isNull);
+    });
+
+    test('enqueueSaveAheadOfUploads on a synced draft makes it pending again', () async {
+      await insertSynced('done-1');
+      await OutboxDatabase.instance.enqueueSaveAheadOfUploads('done-1');
+
+      final draft = await OutboxDatabase.instance.getDraft('done-1');
+      expect(draft!['synced_at'], isNull);
     });
   });
 
@@ -356,6 +432,94 @@ void main() {
       // Form payloads survive sign-out so an already-known form can still
       // be filled offline after signing back in.
       expect(await OutboxDatabase.instance.cacheGet('form:FORM-1'), isNotNull);
+    });
+  });
+
+  group('unsaved (scratch) fills', () {
+    Future<void> insertScratch(String localId, {String? stage = 'STAGE-1'}) {
+      return OutboxDatabase.instance.insertDraft(
+        localId: localId,
+        form: 'FORM-1',
+        stage: stage,
+        answers: const {},
+        state: OutboxDatabase.scratchState,
+      );
+    }
+
+    test('getScratchDraft returns the unfinished fill for that form and stage', () async {
+      await insertScratch('local-1');
+
+      final found = await OutboxDatabase.instance.getScratchDraft('FORM-1', 'STAGE-1');
+      expect(found?['local_id'], 'local-1');
+    });
+
+    test('getScratchDraft ignores other stages, other forms and saved drafts', () async {
+      await insertScratch('local-1');
+      await OutboxDatabase.instance.insertDraft(
+        localId: 'local-2',
+        form: 'FORM-1',
+        stage: 'STAGE-1',
+        answers: const {},
+      );
+
+      expect(await OutboxDatabase.instance.getScratchDraft('FORM-1', 'STAGE-2'), isNull);
+      expect(await OutboxDatabase.instance.getScratchDraft('FORM-2', 'STAGE-1'), isNull);
+
+      await OutboxDatabase.instance.setDraftState('local-1', 'local');
+      expect(await OutboxDatabase.instance.getScratchDraft('FORM-1', 'STAGE-1'), isNull);
+    });
+
+    test('getScratchDraft finds a fill that has no stage', () async {
+      await insertScratch('local-1', stage: null);
+
+      expect(await OutboxDatabase.instance.getScratchDraft('FORM-1', null), isNotNull);
+      expect(await OutboxDatabase.instance.getScratchDraft('FORM-1', 'STAGE-1'), isNull);
+    });
+
+    test('a scratch fill with a photo queued is not listed or counted as pending', () async {
+      await insertScratch('local-1');
+      await OutboxDatabase.instance.enqueueUpload('local-1', 'q1', '/tmp/a.jpg');
+
+      expect(await OutboxDatabase.instance.getAllDrafts(), isEmpty);
+      expect(await OutboxDatabase.instance.countPending(), 0);
+
+      // Once saved it's a real pending draft.
+      await OutboxDatabase.instance.setDraftState('local-1', 'local');
+      expect(await OutboxDatabase.instance.getAllDrafts(), hasLength(1));
+      expect(await OutboxDatabase.instance.countPending(), 1);
+    });
+
+    test('enqueueSaveAheadOfUploads puts the save before photos queued earlier', () async {
+      await insertScratch('local-1');
+      await OutboxDatabase.instance.enqueueUpload('local-1', 'q1', '/tmp/a.jpg');
+      await OutboxDatabase.instance.enqueueUpload('local-1', 'q2', '/tmp/b.jpg');
+
+      await OutboxDatabase.instance.enqueueSaveAheadOfUploads('local-1');
+
+      final jobs = await OutboxDatabase.instance.pendingJobs();
+      expect(jobs.map((j) => j['kind']), ['save', 'upload', 'upload']);
+      // The photos keep their payloads and relative order.
+      expect(jobs[1]['payload_json'], contains('q1'));
+      expect(jobs[2]['payload_json'], contains('q2'));
+    });
+
+    test('enqueueSaveAheadOfUploads does not queue a second save', () async {
+      await insertScratch('local-1');
+
+      await OutboxDatabase.instance.enqueueSaveAheadOfUploads('local-1');
+      await OutboxDatabase.instance.enqueueSaveAheadOfUploads('local-1');
+
+      expect(await OutboxDatabase.instance.pendingJobs(), hasLength(1));
+    });
+
+    test('deleteDraftAndJobs clears a scratch fill and its queued photos', () async {
+      await insertScratch('local-1');
+      await OutboxDatabase.instance.enqueueUpload('local-1', 'q1', '/tmp/a.jpg');
+
+      await OutboxDatabase.instance.deleteDraftAndJobs('local-1');
+
+      expect(await OutboxDatabase.instance.getScratchDraft('FORM-1', 'STAGE-1'), isNull);
+      expect(await OutboxDatabase.instance.pendingJobs(), isEmpty);
     });
   });
 }

@@ -9,9 +9,17 @@ import 'core/theme/app_theme.dart';
 import 'features/auth/presentation/login_page.dart';
 import 'features/home/presentation/dashboard_page.dart';
 
+/// Override at launch with `--dart-define=API_BASE_URL=...` — e.g.
+/// `http://10.0.2.2:8800/` for the Android emulator, which can't reach the
+/// dev machine's LAN IP the way a real phone on the same WiFi can.
+const _baseUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'http://172.16.117.47:8800/',
+);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  sdk = FrappeSDK(baseUrl: 'http://10.0.2.2:8800/');
+  sdk = FrappeSDK(baseUrl: _baseUrl);
   await sdk.initialize(true); // tries to restore a stored session
   infrive = InfriveApi(sdk.api);
   await initConnectivity();

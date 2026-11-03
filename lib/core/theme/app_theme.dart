@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'app_colors.dart';
+import 'smooth_page_transitions.dart';
 
 /// App-wide `ThemeData`, ported from the ConstructionHub design system —
 /// every screen that reaches for `Theme.of(context)` (which Scaffold,
@@ -14,6 +15,7 @@ class AppTheme {
   static ThemeData get light {
     return ThemeData(
       useMaterial3: true,
+      pageTransitionsTheme: smoothPageTransitionsTheme,
       colorScheme: ColorScheme.fromSeed(
         seedColor: AppColors.orange,
         primary: AppColors.orange,

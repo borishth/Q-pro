@@ -19,6 +19,18 @@ class _DraftsPageState extends State<DraftsPage> {
   List<Map<String, dynamic>> drafts = [];
   Map<String, List<Map<String, dynamic>>> uploadsByDraft = {};
 
+  /// A draft the queue has finished with. It stays on this screen as a
+  /// done receipt — otherwise it would just disappear the moment the
+  /// connection came back, with nothing to confirm it went through — and
+  /// is removed only when the user clears it.
+  bool isSynced(Map<String, dynamic> draft) =>
+      draft['synced_at'] != null && draft['state'] != 'attention';
+
+  /// A drained draft that was submitted, not just saved — reopening it
+  /// can't submit again, so its card offers View rather than Edit.
+  bool isSubmitted(Map<String, dynamic> draft) =>
+      isSynced(draft) && draft['state'] == OutboxDatabase.syncedState;
+
   @override
   void initState() {
     super.initState();
@@ -59,10 +71,37 @@ class _DraftsPageState extends State<DraftsPage> {
     fetchDrafts();
   }
 
+  /// Reopens a draft in the form screen. A submitted one opens read only
+  /// — hence the card's View label — so this is the handler for both.
   Future<void> edit(String localId) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FormFillPage.resume(resumeLocalId: localId),
+      ),
+    );
+    fetchDrafts();
+  }
+
+  /// Removes an already-synced draft's local record. Nothing is queued
+  /// against it and the server already has it, so there's nothing to
+  /// warn about — unlike [discard], which throws away unsent work.
+  Future<void> clear(String localId) async {
+    await OutboxDatabase.instance.deleteDraftAndJobs(localId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Removed from drafts.')),
+    );
+    fetchDrafts();
+  }
+
+  Future<void> clearAllSynced() async {
+    final removed = await OutboxDatabase.instance.clearSyncedDrafts();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          removed == 1 ? '1 synced draft cleared.' : '$removed synced drafts cleared.',
+        ),
       ),
     );
     fetchDrafts();
@@ -102,11 +141,16 @@ class _DraftsPageState extends State<DraftsPage> {
     final localId = draft['local_id'] as String;
     final error = draft['error'] as String?;
     final updatedAt = draft['updated_at'] as int;
+    final syncedAt = draft['synced_at'] as int?;
+    final synced = isSynced(draft);
+    final submitted = isSubmitted(draft);
 
-    final (label, color) = switch (state) {
-      'attention' => ('Needs attention', Colors.red),
-      'syncing' => ('Syncing', Colors.blue),
-      _ => ('Waiting to sync', Colors.orange),
+    final (label, color, icon) = switch (state) {
+      'attention' => ('Needs attention', Colors.red, Icons.error_outline),
+      _ when submitted => ('Submitted', Colors.green.shade700, Icons.check_circle),
+      _ when synced => ('Synced', Colors.green.shade700, Icons.check_circle),
+      'syncing' => ('Uploading', Colors.blue, Icons.cloud_upload_outlined),
+      _ => ('Waiting to upload', Colors.orange, Icons.schedule),
     };
 
     return Card(
@@ -125,15 +169,20 @@ class _DraftsPageState extends State<DraftsPage> {
                   ),
                 ),
                 Chip(
+                  avatar: Icon(icon, size: 18, color: color),
                   label: Text(label),
                   backgroundColor: color.withValues(alpha: 0.15),
                   labelStyle: TextStyle(color: color),
+                  side: BorderSide.none,
+                  visualDensity: VisualDensity.compact,
                 ),
               ],
             ),
             const SizedBox(height: 4),
             Text(
-              relativeTime(updatedAt),
+              synced && syncedAt != null
+                  ? '$label ${relativeTime(syncedAt)}'
+                  : relativeTime(updatedAt),
               style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
             ),
             if (error != null && error.isNotEmpty) ...[
@@ -147,17 +196,24 @@ class _DraftsPageState extends State<DraftsPage> {
               children: [
                 OutlinedButton(
                   onPressed: () => edit(localId),
-                  child: const Text('Edit'),
+                  child: Text(submitted ? 'View' : 'Edit'),
                 ),
                 if (state == 'attention')
                   FilledButton.tonal(
                     onPressed: () => retry(localId),
                     child: const Text('Retry'),
                   ),
-                OutlinedButton(
-                  onPressed: () => discard(localId),
-                  child: const Text('Discard'),
-                ),
+                if (synced)
+                  OutlinedButton.icon(
+                    onPressed: () => clear(localId),
+                    icon: const Icon(Icons.clear, size: 18),
+                    label: const Text('Clear'),
+                  )
+                else
+                  OutlinedButton(
+                    onPressed: () => discard(localId),
+                    child: const Text('Discard'),
+                  ),
               ],
             ),
           ],
@@ -168,10 +224,18 @@ class _DraftsPageState extends State<DraftsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final hasSynced = drafts.any(isSynced);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Drafts'),
         actions: [
+          if (hasSynced)
+            IconButton(
+              tooltip: 'Clear synced',
+              onPressed: isLoading ? null : clearAllSynced,
+              icon: const Icon(Icons.playlist_remove),
+            ),
           IconButton(
             tooltip: 'Refresh',
             onPressed: isLoading ? null : fetchDrafts,

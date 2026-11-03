@@ -1,10 +1,12 @@
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 
 import '../../features/auth/models/me.dart';
+import '../../features/forms/models/form_payload.dart';
 import '../../features/forms/models/form_summary.dart';
 import '../../features/forms/models/submission_detail.dart';
 import '../../features/forms/models/submission_row.dart';
 import '../../features/inbox/models/inbox_row.dart';
+import '../../features/notifications/models/app_notification.dart';
 import '../../features/projects/models/project.dart';
 import '../../features/stages/models/hierarchy.dart';
 import '../../features/stages/models/stage_dashboard.dart';
@@ -105,6 +107,14 @@ class InfriveApi {
       ))
           .map((e) => FormSummary.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList();
+
+  /// A form's questions on their own — read-only, so opening a form to fill
+  /// it doesn't create a submission on the server.
+  Future<FormPayload> getForm(String form) async => FormPayload.fromJson(
+        Map<String, dynamic>.from(
+          await _call<Map>('forms.get_form', {'form': form}, get: true),
+        ),
+      );
 
   // ---- submissions
 
@@ -212,4 +222,43 @@ class InfriveApi {
         'action': action,
         'comment': comment,
       }));
+
+  // ---- notifications
+
+  /// Every notification for the signed-in user, newest first. The server
+  /// filters by session user — there is deliberately no user argument.
+  Future<List<AppNotification>> notifications({int limit = 50}) async {
+    final raw = await _call<List>(
+      'notifications.list_notifications',
+      {'limit': limit},
+      get: true,
+    );
+    await OutboxDatabase.instance.cachePut('notifications', raw);
+    return raw
+        .map((e) => AppNotification.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  Future<List<AppNotification>?> cachedNotifications() async {
+    final raw =
+        await OutboxDatabase.instance.cacheGet('notifications') as List?;
+    return raw
+        ?.map((e) => AppNotification.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  Future<int> unreadNotificationCount() async {
+    final raw = await _call('notifications.unread_count', {}, get: true);
+    return raw is int ? raw : int.tryParse('$raw') ?? 0;
+  }
+
+  Future<void> markNotificationRead(String name) =>
+      _call('notifications.mark_read', {'name': name});
+
+  Future<void> markAllNotificationsRead() =>
+      _call('notifications.mark_all_read', {});
+
+  /// Removes one notification for good — what a swipe-away does.
+  Future<void> dismissNotification(String name) =>
+      _call('notifications.dismiss', {'name': name});
 }

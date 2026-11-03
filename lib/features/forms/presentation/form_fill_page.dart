@@ -17,12 +17,12 @@ import '../../../core/storage/outbox_db.dart';
 import '../../../core/storage/outbox_sync.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_nav_bar.dart';
+import '../../../core/widgets/mic_dictation_button.dart';
 import '../../../core/widgets/scale_button.dart';
 import '../models/field_behaviour.dart';
 import '../models/form_payload.dart';
 import '../models/question.dart';
 import '../models/submission_detail.dart';
-import '../services/draft_saver.dart';
 import 'link_picker_page.dart';
 import 'signature_capture_page.dart';
 
@@ -39,31 +39,6 @@ String _absoluteFileUrl(String url) {
       : sdk.baseUrl;
   final path = url.startsWith('/') ? url : '/$url';
   return '$base$path';
-}
-
-/// Field-type badge shown in each question's header — purely cosmetic,
-/// same spirit as the ConstructionHub design's field-type pills.
-(String, String) _fieldMeta(Question question, String link) {
-  if (link.isNotEmpty) return ('🔗', 'LINK');
-  return switch (question.type) {
-    'text' => ('📝', 'TEXT'),
-    'textarea' => ('📝', 'TEXT'),
-    'number' => ('🔢', 'NUMBER'),
-    'currency' => ('💰', 'CURRENCY'),
-    'rating' => ('⭐', 'RATING'),
-    'date' => ('📅', 'DATE'),
-    'datetime' => ('📅', 'DATETIME'),
-    'yes_no' => ('☑️', 'YES/NO'),
-    'checkbox' => ('☑️', 'CHECKBOX'),
-    'select' => ('▾', 'SELECT'),
-    'radio' => ('◉', 'RADIO'),
-    'multi_select' => ('▾', 'MULTI'),
-    'table' => ('📋', 'TABLE'),
-    'file' => ('📎', 'FILE'),
-    'image' => ('🖼️', 'IMAGE'),
-    'signature' => ('✒️', 'SIGNATURE'),
-    _ => ('📝', 'TEXT'),
-  };
 }
 
 bool _isAnswered(dynamic value) {
@@ -103,25 +78,43 @@ class FormFillPage extends StatefulWidget {
 class _FormFillPageState extends State<FormFillPage> {
   bool isLoading = true;
   bool isSubmitting = false;
+  bool isSavingDraft = false;
   String? errorMessage;
   SubmissionDetail? submission;
   final Map<String, dynamic> answers = {};
   final Map<String, bool> uploading = {};
   final Map<String, String> pendingUploadPaths = {};
   final ImagePicker _imagePicker = ImagePicker();
-  DraftSaver? saver;
 
   /// True once this page is working against a local draft row rather than
-  /// calling the server directly — either because no connection was
-  /// available when it was created, or because it was reopened from the
-  /// Drafts screen for editing.
+  /// calling the server directly. Always the case: opening a form creates
+  /// nothing on the server, and edits only land in this device's draft row
+  /// until the user taps Save Draft or Submit.
   bool isLocalDraft = false;
+
+  /// True while this fill has never been saved or submitted, so it exists
+  /// only on this device (a `scratch` draft row). The next time the same
+  /// form is opened, [openForm] hands it back.
+  bool isScratch = false;
+
+  /// True once Save Draft or Submit has sent (or queued) this fill.
+  bool savedToServer = false;
+
+  /// Edits made since the last Save Draft — the server doesn't have them
+  /// yet, and leaving would drop them, so the back button asks first.
+  bool hasUnsavedEdits = false;
 
   /// True once a background sync finishes this exact draft (its `submit`
   /// job completed) while this screen was still open — further edits are
   /// blocked so the user can't queue a second submit on an already-done
   /// draft (see `_reconcileWithBackgroundSync`).
   bool backgroundSynced = false;
+
+  /// True when this page opened a draft that has already been submitted —
+  /// the Drafts screen's "View". The server has it and reopening can't send
+  /// it again, so every field renders disabled and the submit bar is
+  /// replaced by a note saying as much.
+  bool isViewOnly = false;
 
   @override
   void initState() {
@@ -132,7 +125,7 @@ class _FormFillPageState extends State<FormFillPage> {
     if (resumeId != null) {
       _resumeDraft(resumeId);
     } else {
-      createDraft();
+      openForm();
     }
   }
 
@@ -140,8 +133,6 @@ class _FormFillPageState extends State<FormFillPage> {
   void dispose() {
     isOnline.removeListener(_handleConnectivityChange);
     OutboxSync.instance.pendingCount.removeListener(_handleQueueChange);
-    saver?.flush();
-    saver?.dispose();
     super.dispose();
   }
 
@@ -163,7 +154,7 @@ class _FormFillPageState extends State<FormFillPage> {
   /// right now is never clobbered by a stale background snapshot of it.
   Future<void> _reconcileWithBackgroundSync() async {
     final current = submission;
-    if (current == null || !isLocalDraft || !mounted) return;
+    if (current == null || !isLocalDraft || isViewOnly || !mounted) return;
 
     final draft = await OutboxDatabase.instance.getDraft(current.name);
     if (draft == null || !mounted) return;
@@ -202,40 +193,22 @@ class _FormFillPageState extends State<FormFillPage> {
     });
   }
 
-  Future<void> createDraft() async {
+  /// Opens the form for filling without creating anything on the server:
+  /// the questions come from a read-only `get_form` (or the cache when
+  /// offline), and the answers live in a local `scratch` draft until the
+  /// user taps Save Draft or Submit. A fill left unfinished last time is
+  /// restored instead of starting over.
+  Future<void> openForm() async {
     setState(() {
       isLoading = true;
       errorMessage = null;
     });
 
+    final formId = widget.formId!;
+
     if (isOnline.value) {
       try {
-        final draft = await infrive.saveSubmission(
-          form: widget.formId!,
-          stage: widget.stageId,
-        );
-        await _cacheFormPayload(draft.form);
-        // Mirror it locally too (local_id == server name here) so a
-        // queued upload or a mid-session connectivity drop always has a
-        // drafts row to attach to.
-        await OutboxDatabase.instance.insertDraft(
-          localId: draft.name,
-          serverName: draft.name,
-          form: widget.formId!,
-          stage: widget.stageId,
-          answers: draft.answers,
-        );
-
-        if (!mounted) return;
-
-        setState(() {
-          submission = draft;
-          answers.addAll(draft.answers);
-          isLocalDraft = false;
-          isLoading = false;
-        });
-        saver = DraftSaver(infrive, widget.formId!, draft.name);
-        return;
+        await _cacheFormPayload(await infrive.getForm(formId));
       } catch (error) {
         if (error is! NetworkException) {
           if (!mounted) return;
@@ -250,11 +223,21 @@ class _FormFillPageState extends State<FormFillPage> {
           });
           return;
         }
-        // Lost connection mid-request: fall through to the offline path.
+        // Lost connection mid-request: fall back to the cached questions.
       }
     }
 
-    await _createOfflineDraft();
+    final unfinished = await OutboxDatabase.instance.getScratchDraft(
+      formId,
+      widget.stageId,
+    );
+    if (!mounted) return;
+
+    if (unfinished != null) {
+      await _resumeDraft(unfinished['local_id'] as String);
+    } else {
+      await _createScratchDraft();
+    }
   }
 
   Future<void> _cacheFormPayload(FormPayload form) {
@@ -279,7 +262,7 @@ class _FormFillPageState extends State<FormFillPage> {
     });
   }
 
-  Future<void> _createOfflineDraft() async {
+  Future<void> _createScratchDraft() async {
     final cached =
         await OutboxDatabase.instance.cacheGet('form:${widget.formId!}');
     if (!mounted) return;
@@ -300,13 +283,13 @@ class _FormFillPageState extends State<FormFillPage> {
       form: widget.formId!,
       stage: widget.stageId,
       answers: const {},
+      state: OutboxDatabase.scratchState,
     );
-    await OutboxDatabase.instance.enqueueIfAbsent('save', localId);
-    OutboxSync.instance.wake();
 
     if (!mounted) return;
     setState(() {
       isLocalDraft = true;
+      isScratch = true;
       submission = SubmissionDetail(
         name: localId,
         status: 'Draft',
@@ -355,6 +338,9 @@ class _FormFillPageState extends State<FormFillPage> {
       return;
     }
 
+    // Already submitted: this is a look back at what was sent, not an edit.
+    final submitted = draft['state'] == OutboxDatabase.syncedState;
+
     if (draft['state'] == 'attention') {
       await OutboxDatabase.instance.setDraftState(
         localId,
@@ -367,14 +353,16 @@ class _FormFillPageState extends State<FormFillPage> {
 
     setState(() {
       isLocalDraft = true;
+      isViewOnly = submitted;
+      isScratch = draft['state'] == OutboxDatabase.scratchState;
       submission = SubmissionDetail(
         name: localId,
-        status: 'Draft',
+        status: submitted ? 'Submitted' : 'Draft',
         project: '',
         stage: (draft['stage'] as String?) ?? '',
         form: FormPayload.fromJson(cached as Map<String, dynamic>),
         answers: savedAnswers,
-        editable: true,
+        editable: !submitted,
         permissions: Permissions.none,
         transitions: const [],
         history: const [],
@@ -388,20 +376,19 @@ class _FormFillPageState extends State<FormFillPage> {
   }
 
   void updateAnswer(String questionId, dynamic value) {
+    // A submitted draft is the record of what was sent; nothing changes it.
+    if (isViewOnly) return;
     setState(() {
       answers[questionId] = value;
+      if (savedToServer) hasUnsavedEdits = true;
     });
 
     final current = submission;
     if (current == null) return;
 
-    if (isLocalDraft) {
-      OutboxDatabase.instance.updateDraftAnswers(current.name, answers);
-      OutboxDatabase.instance.enqueueIfAbsent('save', current.name);
-      OutboxSync.instance.wake();
-    } else {
-      saver?.change(questionId, value);
-    }
+    // Edits only ever land in this device's draft row; the server hears
+    // about them when the user taps Save Draft or Submit.
+    OutboxDatabase.instance.updateDraftAnswers(current.name, answers);
   }
 
   Future<void> pickImage(Question question, ImageSource source) async {
@@ -442,101 +429,229 @@ class _FormFillPageState extends State<FormFillPage> {
     if (current == null) return;
 
     // Picking is always local — only the actual upload needs the network
-    // and a draft the server already knows about. Otherwise queue it.
-    if (!isOnline.value || isLocalDraft) {
-      setState(() => pendingUploadPaths[question.id] = file.path);
-      await OutboxDatabase.instance.enqueueUpload(
-        current.name,
-        question.id,
-        file.path,
-      );
-      OutboxSync.instance.wake();
-      return;
-    }
-
-    setState(() => uploading[question.id] = true);
-
-    try {
-      final uploaded = await sdk.api.attachment.uploadFile(
-        file,
-        doctype: 'Form Submission',
-        docname: current.name,
-      );
-      final url = uploaded['file_url']?.toString();
-      if (url == null || url.isEmpty) {
-        throw Exception('Upload did not return a file URL.');
-      }
-
-      unawaited(file.delete().catchError((_) => file));
-
-      if (!mounted) return;
-      updateAnswer(question.id, url);
-    } catch (error) {
-      if (!mounted) return;
-      if (isSessionExpired(error)) {
-        signOutToLogin(context);
-        return;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: ${describeError(error)}')),
-      );
-    } finally {
-      if (mounted) setState(() => uploading[question.id] = false);
-    }
+    // and a draft the server already knows about, so it's queued and waits
+    // for the draft's first Save Draft or Submit.
+    setState(() => pendingUploadPaths[question.id] = file.path);
+    await OutboxDatabase.instance.enqueueUpload(
+      current.name,
+      question.id,
+      file.path,
+    );
+    OutboxSync.instance.wake();
   }
 
   Future<void> submit() async {
     final current = submission;
     if (current == null) return;
 
-    if (isLocalDraft) {
-      setState(() => isSubmitting = true);
-      await OutboxDatabase.instance.updateDraftAnswers(current.name, answers);
-      await OutboxDatabase.instance.enqueueIfAbsent('submit', current.name);
-      OutboxSync.instance.wake();
+    setState(() => isSubmitting = true);
+    await OutboxDatabase.instance.updateDraftAnswers(current.name, answers);
 
-      if (!mounted) return;
-      setState(() => isSubmitting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Saved offline — it'll submit once you're back online."),
-        ),
-      );
-      Navigator.of(context).pop();
-      return;
+    // Straight to the server when there's a connection and no photo still
+    // waiting to upload, so a problem (a missing required answer, say)
+    // shows up right here. Otherwise it goes through the queue, which
+    // keeps the save -> upload -> submit order.
+    if (isOnline.value && pendingUploadPaths.isEmpty) {
+      try {
+        final serverName = await _saveToServer(current.name);
+        await infrive.submit(serverName, answers: answers);
+        await OutboxDatabase.instance.setDraftState(current.name, 'synced');
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Submitted.')),
+        );
+        Navigator.of(context).pop();
+        return;
+      } catch (error) {
+        if (!mounted) return;
+        if (isSessionExpired(error)) {
+          signOutToLogin(context);
+          return;
+        }
+        if (error is! NetworkException) {
+          setState(() => isSubmitting = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(describeError(error))),
+          );
+          return;
+        }
+        // Lost connection mid-request: queue it instead.
+      }
     }
 
-    await saver?.flush();
+    await OutboxDatabase.instance.enqueueSaveAheadOfUploads(current.name);
+    await OutboxDatabase.instance.enqueueIfAbsent('submit', current.name);
+    await _leaveScratch(current.name);
+    OutboxSync.instance.wake();
 
-    setState(() {
-      isSubmitting = true;
-    });
+    if (!mounted) return;
+    setState(() => isSubmitting = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("Saved — it'll submit as soon as it can sync."),
+      ),
+    );
+    Navigator.of(context).pop();
+  }
 
-    try {
-      await infrive.submit(current.name, answers: answers);
-      await OutboxDatabase.instance.setDraftState(current.name, 'synced');
+  /// Writes the draft's answers to the server — creating the submission the
+  /// first time — and returns its name. The name is stored on the draft
+  /// right away, so a retry updates that submission instead of creating
+  /// another one.
+  Future<String> _saveToServer(String localId) async {
+    final draft = (await OutboxDatabase.instance.getDraft(localId))!;
+    final existing = draft['server_name'] as String?;
+    final saved = await infrive.saveSubmission(
+      form: draft['form'] as String,
+      stage: draft['stage'] as String?,
+      submission: existing,
+      answers: answers,
+    );
+    if (existing == null) {
+      await OutboxDatabase.instance.setDraftServerName(localId, saved.name);
+    }
+    if (mounted) setState(() => isScratch = false);
+    return saved.name;
+  }
 
-      if (!mounted) return;
+  /// Takes a never-saved draft off the scratch shelf once it's headed to
+  /// the server through the queue, so it shows up as a pending draft.
+  Future<void> _leaveScratch(String localId) async {
+    final draft = await OutboxDatabase.instance.getDraft(localId);
+    if (draft?['state'] == OutboxDatabase.scratchState) {
+      await OutboxDatabase.instance.setDraftState(localId, 'local');
+    }
+    if (mounted) setState(() => isScratch = false);
+  }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Submitted.')),
-      );
-      Navigator.of(context).pop();
-    } catch (error) {
-      if (!mounted) return;
-      if (isSessionExpired(error)) {
-        signOutToLogin(context);
+  Future<void> saveDraft() async {
+    final current = submission;
+    if (current == null) return;
+
+    setState(() => isSavingDraft = true);
+    await OutboxDatabase.instance.updateDraftAnswers(current.name, answers);
+
+    // Same split as submit: direct when it can be, queued otherwise.
+    if (isOnline.value && pendingUploadPaths.isEmpty) {
+      try {
+        await _saveToServer(current.name);
+
+        if (!mounted) return;
+        setState(() {
+          isSavingDraft = false;
+          savedToServer = true;
+          hasUnsavedEdits = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Draft saved.')),
+        );
         return;
+      } catch (error) {
+        if (!mounted) return;
+        if (isSessionExpired(error)) {
+          signOutToLogin(context);
+          return;
+        }
+        if (error is! NetworkException) {
+          setState(() => isSavingDraft = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(describeError(error))),
+          );
+          return;
+        }
+        // Lost connection mid-request: queue it instead.
       }
+    }
 
-      setState(() {
-        isSubmitting = false;
-      });
+    await OutboxDatabase.instance.enqueueSaveAheadOfUploads(current.name);
+    await _leaveScratch(current.name);
+    OutboxSync.instance.wake();
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(describeError(error))),
-      );
+    if (!mounted) return;
+    setState(() {
+      isSavingDraft = false;
+      savedToServer = true;
+      hasUnsavedEdits = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          isOnline.value
+              ? 'Draft saved — attachments are still uploading.'
+              : "Saved offline — it'll sync once you're back online.",
+        ),
+      ),
+    );
+  }
+
+  /// Clears an unsaved fill: nothing was ever sent to the server, so this
+  /// just drops the local copy (and any photos queued with it) and leaves.
+  Future<void> _confirmAndClear() async {
+    final current = submission;
+    if (current == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear this form?'),
+        content: const Text(
+          "Everything you've entered will be removed. Nothing has been saved yet.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep editing'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    await OutboxDatabase.instance.deleteDraftAndJobs(current.name);
+    unawaited(OutboxSync.instance.refreshPendingCount());
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  /// Back was pressed with edits the server doesn't have yet (only possible
+  /// after a Save Draft — before that the whole fill is kept on the device).
+  Future<void> _confirmLeave() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unsaved changes'),
+        content: const Text(
+          'You changed this form after your last Save Draft. Save those changes?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'stay'),
+            child: const Text('Keep editing'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            child: const Text('Discard'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('Save draft'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+
+    if (choice == 'save') {
+      await saveDraft();
+      if (mounted && !hasUnsavedEdits) Navigator.of(context).pop();
+    } else if (choice == 'discard') {
+      setState(() => hasUnsavedEdits = false);
+      Navigator.of(context).pop();
     }
   }
 
@@ -1249,21 +1364,15 @@ class _FormFillPageState extends State<FormFillPage> {
         border: Border.all(color: AppColors.border),
       ),
       padding: EdgeInsets.symmetric(horizontal: 14, vertical: multiline ? 10 : 2),
-      child: TextFormField(
-        initialValue: numeric ? (value?.toString() ?? '') : (value as String? ?? ''),
+      child: _DictatableTextField(
+        key: ValueKey('text-${question.id}'),
+        initialText: numeric ? (value?.toString() ?? '') : (value as String? ?? ''),
         enabled: enabled,
-        maxLines: multiline ? 4 : 1,
-        keyboardType:
-            numeric ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text,
-        style: GoogleFonts.sora(fontSize: 13, color: enabled ? AppColors.text : AppColors.muted),
-        decoration: InputDecoration(
-          hintText: question.help?.isNotEmpty == true
-              ? question.help
-              : (numeric ? 'Enter value...' : 'Type here...'),
-          hintStyle: GoogleFonts.sora(fontSize: 13, color: AppColors.muted),
-          border: InputBorder.none,
-          isDense: true,
-        ),
+        multiline: multiline,
+        numeric: numeric,
+        hint: question.help?.isNotEmpty == true
+            ? question.help!
+            : (numeric ? 'Enter value...' : 'Type here...'),
         onChanged: (v) => updateAnswer(question.id, numeric ? num.tryParse(v) : v),
       ),
     );
@@ -1346,8 +1455,7 @@ class _FormFillPageState extends State<FormFillPage> {
 
   Widget buildQuestion(Question question, int number) {
     final behaviour = FieldBehaviour.parse(question.rule);
-    final enabled = !behaviour.readOnly;
-    final badge = _fieldMeta(question, behaviour.link);
+    final enabled = !behaviour.readOnly && !isViewOnly;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
@@ -1390,29 +1498,6 @@ class _FormFillPageState extends State<FormFillPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: AppColors.light,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(badge.$1, style: const TextStyle(fontSize: 10)),
-                          const SizedBox(width: 4),
-                          Text(
-                            badge.$2,
-                            style: GoogleFonts.ibmPlexMono(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.muted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 6),
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1486,6 +1571,69 @@ class _FormFillPageState extends State<FormFillPage> {
     );
   }
 
+  /// Heads a submitted draft in place of the required-fields progress —
+  /// there is no progress left to make on it.
+  Widget _buildViewOnlyBanner() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: AppColors.tagGreenBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.green.withValues(alpha: 0.25)),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          const Icon(Icons.lock_outline, size: 18, color: AppColors.green),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Submitted — these answers are read only.',
+              style: GoogleFonts.sora(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppColors.green,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Stands in for [_buildSubmitBar] on a submitted draft: nothing left to
+  /// save and nothing left to send, so the only action is back out.
+  Widget _buildViewOnlyBar() {
+    return Container(
+      padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
+      decoration: const BoxDecoration(
+        color: AppColors.white,
+        border: Border(top: BorderSide(color: AppColors.border)),
+      ),
+      child: ScaleButton(
+        onTap: () => Navigator.of(context).maybePop(),
+        scaleBound: 0.97,
+        child: Container(
+          height: 50,
+          decoration: BoxDecoration(
+            color: AppColors.light,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: AppColors.border, width: 1.5),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            'Done',
+            style: GoogleFonts.sora(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: AppColors.navy,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildProgressCard(int done, int total) {
     final progress = total == 0 ? 0.0 : done / total;
     return Container(
@@ -1531,57 +1679,103 @@ class _FormFillPageState extends State<FormFillPage> {
   }
 
   Widget _buildSubmitBar() {
-    final busy = isSubmitting || backgroundSynced;
+    final busy = isSubmitting || isSavingDraft || backgroundSynced;
     return Container(
       padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).padding.bottom + 16),
       decoration: const BoxDecoration(
         color: AppColors.white,
         border: Border(top: BorderSide(color: AppColors.border)),
       ),
-      child: ScaleButton(
-        onTap: busy ? null : _confirmAndSubmit,
-        scaleBound: 0.97,
-        child: Container(
-          height: 50,
-          decoration: BoxDecoration(
-            color: busy ? AppColors.orange.withValues(alpha: 0.5) : AppColors.orange,
-            borderRadius: BorderRadius.circular(14),
-            boxShadow: busy
-                ? []
-                : [
-                    BoxShadow(
-                      color: AppColors.orange.withValues(alpha: 0.35),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-          ),
-          alignment: Alignment.center,
-          child: isSubmitting
-              ? const SizedBox(
-                  height: 20,
-                  width: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation(Colors.white),
-                  ),
-                )
-              : Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'Submit Form',
-                      style: GoogleFonts.sora(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    const Icon(Icons.send_rounded, size: 16, color: Colors.white),
-                  ],
+      child: Row(
+        children: [
+          Expanded(
+            child: ScaleButton(
+              onTap: busy ? null : saveDraft,
+              scaleBound: 0.97,
+              child: Container(
+                height: 50,
+                decoration: BoxDecoration(
+                  color: AppColors.light,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppColors.border, width: 1.5),
                 ),
-        ),
+                alignment: Alignment.center,
+                child: isSavingDraft
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation(AppColors.navy),
+                        ),
+                      )
+                    : Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            'Save Draft',
+                            style: GoogleFonts.sora(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.navy,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(Icons.save_outlined, size: 16, color: AppColors.navy),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: ScaleButton(
+              onTap: busy ? null : _confirmAndSubmit,
+              scaleBound: 0.97,
+              child: Container(
+                height: 50,
+                decoration: BoxDecoration(
+                  color: busy ? AppColors.orange.withValues(alpha: 0.5) : AppColors.orange,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: busy
+                      ? []
+                      : [
+                          BoxShadow(
+                            color: AppColors.orange.withValues(alpha: 0.35),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                ),
+                alignment: Alignment.center,
+                child: isSubmitting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation(Colors.white),
+                        ),
+                      )
+                    : Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            'Submit',
+                            style: GoogleFonts.sora(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(Icons.send_rounded, size: 16, color: Colors.white),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1594,7 +1788,12 @@ class _FormFillPageState extends State<FormFillPage> {
     final answeredRequired =
         visible.where((q) => q.required && _isAnswered(answers[q.id])).length;
 
-    return Scaffold(
+    return PopScope(
+      canPop: !hasUnsavedEdits,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _confirmLeave();
+      },
+      child: Scaffold(
       backgroundColor: AppColors.light,
       body: Column(
         children: [
@@ -1606,6 +1805,7 @@ class _FormFillPageState extends State<FormFillPage> {
                 AppNavBar(
                   title: current?.form.title ?? widget.formTitle ?? 'Draft',
                   breadcrumb: current != null ? 'FORM · ${current.form.id}' : null,
+                  onBack: () => Navigator.of(context).maybePop(),
                 ),
               ],
             ),
@@ -1629,7 +1829,8 @@ class _FormFillPageState extends State<FormFillPage> {
                               ),
                               const SizedBox(height: 20),
                               ElevatedButton.icon(
-                                onPressed: createDraft,
+                                onPressed:
+                                    widget.resumeLocalId != null ? () => _resumeDraft(widget.resumeLocalId!) : openForm,
                                 icon: const Icon(Icons.refresh),
                                 label: const Text('Try again'),
                               ),
@@ -1642,7 +1843,9 @@ class _FormFillPageState extends State<FormFillPage> {
                         : ListView(
                             padding: const EdgeInsets.all(16),
                             children: [
-                              if (totalRequired > 0)
+                              if (isViewOnly)
+                                _buildViewOnlyBanner()
+                              else if (totalRequired > 0)
                                 _buildProgressCard(answeredRequired, totalRequired),
                               for (var i = 0; i < visible.length; i++)
                                 buildQuestion(visible[i], i + 1),
@@ -1655,13 +1858,105 @@ class _FormFillPageState extends State<FormFillPage> {
                                     style: GoogleFonts.sora(fontSize: 12, color: AppColors.muted),
                                   ),
                                 ),
+                              if (isScratch)
+                                Center(
+                                  child: TextButton.icon(
+                                    onPressed: (isSubmitting || isSavingDraft) ? null : _confirmAndClear,
+                                    icon: const Icon(Icons.delete_outline, size: 18),
+                                    label: const Text('Clear form'),
+                                    style: TextButton.styleFrom(foregroundColor: AppColors.red),
+                                  ),
+                                ),
                             ],
                           ),
           ),
         ],
       ),
-      bottomNavigationBar:
-          (isLoading || errorMessage != null || current == null) ? null : _buildSubmitBar(),
+      bottomNavigationBar: (isLoading || errorMessage != null || current == null)
+          ? null
+          : isViewOnly
+              ? _buildViewOnlyBar()
+              : _buildSubmitBar(),
+      ),
+    );
+  }
+}
+
+/// Text answer field that owns its controller so dictated text can be
+/// appended; shows a mic button for editable string (text/textarea) fields only.
+/// Numeric fields have none — the small on-device model is too unreliable
+/// for digits.
+class _DictatableTextField extends StatefulWidget {
+  const _DictatableTextField({
+    super.key,
+    required this.initialText,
+    required this.enabled,
+    required this.multiline,
+    required this.numeric,
+    required this.hint,
+    required this.onChanged,
+  });
+
+  final String initialText;
+  final bool enabled;
+  final bool multiline;
+  final bool numeric;
+  final String hint;
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_DictatableTextField> createState() => _DictatableTextFieldState();
+}
+
+class _DictatableTextFieldState extends State<_DictatableTextField> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initialText);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _appendDictation(String text) {
+    final existing = _controller.text.trim();
+    final merged = existing.isEmpty ? text : '$existing $text';
+    _controller.text = merged;
+    widget.onChanged(merged);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment:
+          widget.multiline ? CrossAxisAlignment.start : CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _controller,
+            enabled: widget.enabled,
+            maxLines: widget.multiline ? 4 : 1,
+            keyboardType: widget.numeric
+                ? const TextInputType.numberWithOptions(decimal: true)
+                : TextInputType.text,
+            style: GoogleFonts.sora(
+              fontSize: 13,
+              color: widget.enabled ? AppColors.text : AppColors.muted,
+            ),
+            decoration: InputDecoration(
+              hintText: widget.hint,
+              hintStyle: GoogleFonts.sora(fontSize: 13, color: AppColors.muted),
+              border: InputBorder.none,
+              isDense: true,
+            ),
+            onChanged: widget.onChanged,
+          ),
+        ),
+        if (!widget.numeric && widget.enabled) ...[
+          const SizedBox(width: 4),
+          MicDictationButton(onTranscribed: _appendDictation),
+        ],
+      ],
     );
   }
 }

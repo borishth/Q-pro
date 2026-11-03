@@ -16,7 +16,9 @@ class FormSummary {
 
   factory FormSummary.fromJson(Map<String, dynamic> json) => FormSummary(
         id: json['id']?.toString() ?? json['name']?.toString() ?? '',
-        title: json['title']?.toString() ?? 'Untitled form',
+        title: json['title']?.toString() ??
+            json['form_name']?.toString() ??
+            'Untitled form',
         status: json['status']?.toString() ?? 'Unknown',
         version: (json['version'] as num?)?.toInt() ?? 1,
       );

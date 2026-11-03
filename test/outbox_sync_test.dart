@@ -264,6 +264,67 @@ void main() {
     expect(jobs, hasLength(1), reason: 'upload must stay queued until save gives it a server name');
   });
 
+  test('a drained queue stamps the draft as synced so it stays listed as done', () async {
+    await OutboxDatabase.instance.insertDraft(
+      localId: 'local-1',
+      form: 'FORM-1',
+      answers: const {},
+    );
+    await OutboxDatabase.instance.enqueueIfAbsent('save', 'local-1');
+    api.queueSave(() => _fakeSubmission('SUB-0001'));
+
+    await OutboxSync.instance.drainForTesting();
+
+    final draft = await OutboxDatabase.instance.getDraft('local-1');
+    expect(draft!['synced_at'], isNotNull);
+    // Saved, not submitted — the state must not claim otherwise.
+    expect(draft['state'], isNot(OutboxDatabase.syncedState));
+    expect(
+      (await OutboxDatabase.instance.getAllDrafts()).map((d) => d['local_id']),
+      contains('local-1'),
+      reason: 'a finished draft stays on the Drafts screen until cleared',
+    );
+  });
+
+  test('a draft is only stamped synced once its last job drains', () async {
+    await OutboxDatabase.instance.insertDraft(
+      localId: 'local-1',
+      form: 'FORM-1',
+      answers: const {},
+    );
+    await OutboxDatabase.instance.enqueueIfAbsent('save', 'local-1');
+    await OutboxDatabase.instance.enqueueIfAbsent('submit', 'local-1');
+    api.queueSave(() => _fakeSubmission('SUB-0001'));
+    api.queueSubmit(() => throw NetworkException('offline'));
+
+    await OutboxSync.instance.drainForTesting();
+
+    final draft = await OutboxDatabase.instance.getDraft('local-1');
+    expect(draft!['synced_at'], isNull,
+        reason: 'the submit is still queued, so nothing is done yet');
+  });
+
+  test('a failed job after a drain clears the synced stamp again', () async {
+    await OutboxDatabase.instance.insertDraft(
+      localId: 'local-1',
+      serverName: 'SUB-0001',
+      form: 'FORM-1',
+      answers: const {},
+    );
+    await OutboxDatabase.instance.enqueueIfAbsent('save', 'local-1');
+    api.queueSave(() => _fakeSubmission('SUB-0001'));
+    await OutboxSync.instance.drainForTesting();
+    expect((await OutboxDatabase.instance.getDraft('local-1'))!['synced_at'],
+        isNotNull);
+
+    // The user edits the draft again, putting fresh work on the queue.
+    await OutboxDatabase.instance.enqueueIfAbsent('submit', 'local-1');
+
+    final draft = await OutboxDatabase.instance.getDraft('local-1');
+    expect(draft!['synced_at'], isNull,
+        reason: 'queueing new work makes the draft pending again');
+  });
+
   test('a missing draft (discarded mid-flight) just drops its orphaned job', () async {
     await OutboxDatabase.instance.enqueueIfAbsent('save', 'does-not-exist');
 
