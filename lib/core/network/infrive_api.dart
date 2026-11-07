@@ -212,15 +212,20 @@ class InfriveApi {
         .toList();
   }
 
+  /// Runs a workflow action. [rating] is the 1-5 compliance score and is
+  /// required on approvals, rejected server-side if missing; `_clean` drops
+  /// it for every other action, where the server stores 0.
   Future<SubmissionDetail> transition(
     String submission,
     String action, {
     String? comment,
+    int? rating,
   }) async =>
       SubmissionDetail.fromJson(await _call('workflow.transition', {
         'submission': submission,
         'action': action,
         'comment': comment,
+        'rating': rating,
       }));
 
   // ---- notifications

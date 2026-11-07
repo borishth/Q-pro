@@ -45,6 +45,16 @@ dependencies:
   google_fonts: ^6.2.1
   intl: ^0.20.3
 
+  # Geotagged photos: position + reverse-geocoded place name burned into
+  # the image at capture time (see core/services/geo_stamp_service.dart).
+  geolocator: ^13.0.4
+  geocoding: ^4.0.0
+  # Network time: a device clock can be set to anything, so the stamp
+  # carries an NTP-derived time alongside the local one.
+  ntp: ^2.0.0
+  # Re-encoding the stamped canvas as JPEG; dart:ui only writes PNG.
+  image: ^4.12.0
+
   # Offline voice dictation (mic -> .wav -> on-device Whisper)
   record: ^7.1.1
   whisper_ggml: ^2.6.0

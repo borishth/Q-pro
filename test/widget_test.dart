@@ -13,10 +13,7 @@ void main() {
     // network just by rendering, so any InfriveApi/FrappeClient pair is
     // fine here — nothing in it actually gets exercised.
     OutboxSync.resetForTesting();
-    OutboxSync.init(
-      InfriveApi(FrappeClient('http://test.invalid/')),
-      FrappeClient('http://test.invalid/'),
-    );
+    OutboxSync.init(InfriveApi(FrappeClient('http://test.invalid/')));
   });
 
   testWidgets('Shows the login screen when not logged in', (

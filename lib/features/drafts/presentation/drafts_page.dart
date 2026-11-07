@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../core/storage/outbox_db.dart';
 import '../../../core/storage/outbox_sync.dart';
 import '../../../core/utils/string_formatter.dart';
+import '../../../core/widgets/state_views.dart';
 import '../../forms/presentation/form_fill_page.dart';
 
 // ---------------- DRAFTS / SYNC STATUS SCREEN ----------------
@@ -246,7 +247,12 @@ class _DraftsPageState extends State<DraftsPage> {
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : drafts.isEmpty
-              ? const Center(child: Text('Nothing queued.'))
+              ? const EmptyStateView(
+                  icon: Icons.cloud_done_outlined,
+                  title: 'Nothing queued',
+                  body: 'Drafts you save without a connection wait here '
+                      'until they sync.',
+                )
               : RefreshIndicator(
                   onRefresh: fetchDrafts,
                   child: ListView.builder(

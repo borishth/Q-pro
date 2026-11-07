@@ -2,7 +2,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:q_pro/core/models/permissions.dart';
 import 'package:q_pro/features/auth/models/me.dart';
 import 'package:q_pro/features/forms/models/field_behaviour.dart';
+import 'package:q_pro/features/forms/models/history_row.dart';
+import 'package:q_pro/features/forms/models/rating_scale.dart';
 import 'package:q_pro/features/forms/models/submission_detail.dart';
+import 'package:q_pro/features/forms/models/transition.dart';
 import 'package:q_pro/features/inbox/models/inbox_row.dart';
 import 'package:q_pro/features/projects/models/project.dart';
 
@@ -145,6 +148,72 @@ void main() {
 
       final behaviour = FieldBehaviour.parse(detail.form.questions.first.rule);
       expect(behaviour.link, 'FORM-9');
+    });
+  });
+
+  group('Transition.requiresRating', () {
+    Transition t(String permissionAction) => Transition.fromJson({
+          'action': 'Approve',
+          'permission_action': permissionAction,
+        });
+
+    test('only approvals carry a rating', () {
+      expect(t('approve').requiresRating, isTrue);
+      expect(t('reject').requiresRating, isFalse);
+      expect(t('submit').requiresRating, isFalse);
+      expect(t('cancel').requiresRating, isFalse);
+    });
+  });
+
+  group('HistoryRow.fromJson', () {
+    test('parses a rated approval', () {
+      final row = HistoryRow.fromJson({
+        'action': 'Approve',
+        'action_by': 'ravi@infrive.test',
+        'role_used': 'ROLE-001',
+        'rating': 4,
+        'rating_remark': 'High Quality Standards Verified',
+        'action_time': '2026-11-05 10:00:00',
+      });
+      expect(row.rating, 4);
+      expect(row.ratingRemark, 'High Quality Standards Verified');
+    });
+
+    test('an unrated action reads as 0 with no remark', () {
+      final row = HistoryRow.fromJson({
+        'action': 'Submit',
+        'action_by': 'suresh@infrive.test',
+      });
+      expect(row.rating, 0);
+      expect(row.ratingRemark, isNull);
+    });
+
+    test('keeps the stored remark even when the local scale disagrees', () {
+      // The server snapshots the label it showed the approver; a reworded
+      // scale here must not rewrite history.
+      final row = HistoryRow.fromJson({
+        'action': 'Approve',
+        'action_by': 'amit@infrive.test',
+        'rating': 2,
+        'rating_remark': 'Wording the app no longer uses',
+      });
+      expect(row.ratingRemark, isNot(ratingLabel(2)));
+    });
+  });
+
+  group('ratingScale', () {
+    test('covers exactly 1-5, matching the backend RATING_LABELS', () {
+      expect(ratingScale.keys, [1, 2, 3, 4, 5]);
+      expect(minRating, 1);
+      expect(maxRating, 5);
+    });
+
+    test('labels only resolve inside the scale', () {
+      expect(ratingLabel(1), 'Critical Non-Compliance');
+      expect(ratingLabel(5), 'Outstanding Quality & Zero Defects');
+      expect(ratingLabel(null), isNull);
+      expect(ratingLabel(0), isNull);
+      expect(ratingLabel(6), isNull);
     });
   });
 }

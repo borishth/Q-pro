@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/network/app_errors.dart';
 import '../../../core/network/session.dart';
+import '../../../core/widgets/state_views.dart';
 import '../models/submission_row.dart';
 
 // ---------------- LINK FIELD PICKER ----------------
@@ -77,27 +78,17 @@ class _LinkPickerPageState extends State<LinkPickerPage> {
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : errorMessage != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.error_outline, size: 48, color: Colors.red),
-                        const SizedBox(height: 16),
-                        Text(errorMessage!, textAlign: TextAlign.center),
-                        const SizedBox(height: 20),
-                        ElevatedButton.icon(
-                          onPressed: fetchRows,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Try again'),
-                        ),
-                      ],
-                    ),
-                  ),
+              ? ErrorStateView(
+                  message: errorMessage!,
+                  onRetry: fetchRows,
                 )
               : rows.isEmpty
-                  ? const Center(child: Text('No submissions found.'))
+                  ? const EmptyStateView(
+                      icon: Icons.link_off_rounded,
+                      title: 'Nothing to link to',
+                      body: 'This form has no submissions yet, so there is '
+                          'nothing to pick.',
+                    )
                   : ListView.builder(
                       itemCount: rows.length,
                       itemBuilder: (context, index) {

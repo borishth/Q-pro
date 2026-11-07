@@ -7,18 +7,22 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/models/permissions.dart';
 import '../../../core/network/app_errors.dart';
 import '../../../core/network/session.dart';
 import '../../../core/services/connectivity_service.dart';
+import '../../../core/services/geo_stamp_service.dart';
+import '../../../core/services/photo_stamper.dart';
 import '../../../core/storage/outbox_db.dart';
 import '../../../core/storage/outbox_sync.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_nav_bar.dart';
 import '../../../core/widgets/mic_dictation_button.dart';
 import '../../../core/widgets/scale_button.dart';
+import '../../../core/widgets/state_views.dart';
 import '../models/field_behaviour.dart';
 import '../models/form_payload.dart';
 import '../models/question.dart';
@@ -83,6 +87,10 @@ class _FormFillPageState extends State<FormFillPage> {
   SubmissionDetail? submission;
   final Map<String, dynamic> answers = {};
   final Map<String, bool> uploading = {};
+
+  /// Question ids whose photo is having its location stamp applied —
+  /// waiting on a GPS fix, so worth showing rather than looking frozen.
+  final Map<String, bool> stamping = {};
   final Map<String, String> pendingUploadPaths = {};
   final ImagePicker _imagePicker = ImagePicker();
 
@@ -121,6 +129,9 @@ class _FormFillPageState extends State<FormFillPage> {
     super.initState();
     isOnline.addListener(_handleConnectivityChange);
     OutboxSync.instance.pendingCount.addListener(_handleQueueChange);
+    // A cold GPS fix and NTP sync take seconds; start them now so a photo
+    // taken later in the form doesn't wait on them.
+    PhotoStampService.instance.prewarm();
     final resumeId = widget.resumeLocalId;
     if (resumeId != null) {
       _resumeDraft(resumeId);
@@ -398,7 +409,53 @@ class _FormFillPageState extends State<FormFillPage> {
       maxWidth: 1600,
     );
     if (picked == null || !mounted) return;
-    await uploadFileAnswer(question, File(picked.path));
+    await uploadFileAnswer(question, await _geoStamped(question, File(picked.path)));
+  }
+
+  /// Burns the current position and time onto a photo before it is queued.
+  ///
+  /// Gallery picks are stamped as well as camera shots: the band records
+  /// where and when the stamp was applied, which for a gallery photo is
+  /// not where the shot was taken. A failure here never costs the photo —
+  /// the original is attached unstamped.
+  Future<File> _geoStamped(Question question, File photo) async {
+    setState(() => stamping[question.id] = true);
+    try {
+      final stamp = await PhotoStampService.instance.capture();
+      if (mounted && stamp.failure != null) {
+        _reportStampFailure(stamp.failure!);
+      }
+      return await stampPhoto(photo, stamp);
+    } catch (_) {
+      return photo;
+    } finally {
+      if (mounted) setState(() => stamping.remove(question.id));
+    }
+  }
+
+  /// Tells the user the photo went up without a location, and offers the
+  /// one action that can actually fix it. A denied permission can only be
+  /// undone in system settings; a missed fix is just worth retrying.
+  void _reportStampFailure(GeoStampFailure failure) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text('${failure.label} — stamping the time only.'),
+          action: failure.openSettingsHelps
+              ? SnackBarAction(
+                  label: 'Settings',
+                  onPressed: () => failure == GeoStampFailure.servicesOff
+                      ? Geolocator.openLocationSettings()
+                      : Geolocator.openAppSettings(),
+                )
+              : SnackBarAction(
+                  label: 'Retry',
+                  onPressed: PhotoStampService.instance.prewarm,
+                ),
+        ),
+      );
   }
 
   Future<void> pickGenericFile(Question question) async {
@@ -899,19 +956,44 @@ class _FormFillPageState extends State<FormFillPage> {
   /// Picking a photo/signature is always local, so the buttons stay
   /// enabled offline too — only whether the bytes go straight to the
   /// server or get queued changes (see `uploadFileAnswer`).
+  /// A photo stays queued until the outbox drains it, which happens within
+  /// seconds when there's a connection — so the note has to follow
+  /// connectivity rather than assuming a queued file means offline.
   Widget _queuedUploadNote(Question question) {
     if (pendingUploadPaths[question.id] == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Text(
-        "Will upload when you're back online.",
-        style: GoogleFonts.sora(fontSize: 11, color: AppColors.orange, fontWeight: FontWeight.w600),
+    return ValueListenableBuilder<bool>(
+      valueListenable: isOnline,
+      builder: (context, online, _) => Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Row(
+          children: [
+            Icon(
+              online ? Icons.cloud_upload_outlined : Icons.cloud_off_outlined,
+              size: 13,
+              color: AppColors.orange,
+            ),
+            const SizedBox(width: AppSpacing.xs + 2),
+            Expanded(
+              child: Text(
+                online
+                    ? 'Queued for upload.'
+                    : "Will upload when you're back online.",
+                style: GoogleFonts.sora(
+                  fontSize: 11,
+                  color: AppColors.orange,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _imageField(Question question, String? url, bool enabled) {
     final isUploading = uploading[question.id] ?? false;
+    final isStamping = stamping[question.id] ?? false;
     final hasFile = pendingUploadPaths[question.id] != null ||
         (url != null && url.isNotEmpty);
 
@@ -921,7 +1003,25 @@ class _FormFillPageState extends State<FormFillPage> {
         _filePreview(question, url, Icons.image_outlined),
         _queuedUploadNote(question),
         const SizedBox(height: 10),
-        if (isUploading)
+        if (isStamping)
+          Row(
+            children: [
+              const SizedBox(
+                height: 14,
+                width: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.orange,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Adding location…',
+                style: GoogleFonts.sora(fontSize: 12, color: AppColors.muted),
+              ),
+            ],
+          )
+        else if (isUploading)
           const LinearProgressIndicator(color: AppColors.orange, backgroundColor: AppColors.light)
         else if (enabled)
           Wrap(
@@ -1814,29 +1914,11 @@ class _FormFillPageState extends State<FormFillPage> {
             child: isLoading
                 ? const Center(child: CircularProgressIndicator(color: AppColors.navy))
                 : errorMessage != null
-                    ? Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.error_outline, size: 48, color: AppColors.red),
-                              const SizedBox(height: 16),
-                              Text(
-                                errorMessage!,
-                                textAlign: TextAlign.center,
-                                style: GoogleFonts.sora(fontSize: 13, color: AppColors.muted),
-                              ),
-                              const SizedBox(height: 20),
-                              ElevatedButton.icon(
-                                onPressed:
-                                    widget.resumeLocalId != null ? () => _resumeDraft(widget.resumeLocalId!) : openForm,
-                                icon: const Icon(Icons.refresh),
-                                label: const Text('Try again'),
-                              ),
-                            ],
-                          ),
-                        ),
+                    ? ErrorStateView(
+                        message: errorMessage!,
+                        onRetry: widget.resumeLocalId != null
+                            ? () => _resumeDraft(widget.resumeLocalId!)
+                            : openForm,
                       )
                     : current == null
                         ? const SizedBox.shrink()

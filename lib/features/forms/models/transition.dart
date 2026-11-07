@@ -12,6 +12,12 @@ class Transition {
   final String permissionAction;
   final bool requiresComment;
 
+  /// Approvals carry a mandatory 1-5 compliance rating; every other action
+  /// carries none (`RATED_ACTION` in the backend's workflow service). The
+  /// server rejects an approval that arrives without one, so the prompt
+  /// must collect it before the call goes out.
+  bool get requiresRating => permissionAction == 'approve';
+
   factory Transition.fromJson(Map<String, dynamic> json) => Transition(
         action: json['action']?.toString() ?? '',
         permissionAction: json['permission_action']?.toString() ?? '',

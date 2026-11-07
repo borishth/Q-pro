@@ -8,6 +8,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_nav_bar.dart';
 import '../../../core/widgets/cached_data_banner.dart';
 import '../../../core/widgets/scale_button.dart';
+import '../../../core/widgets/state_views.dart';
 import '../../../core/widgets/status_tag.dart';
 import '../../stages/presentation/hierarchy_page.dart';
 import '../models/project.dart';
@@ -141,59 +142,18 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
 
     if (errorMessage != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.error_outline, size: 48, color: AppColors.red),
-              const SizedBox(height: 16),
-              Text(
-                'Could not load projects',
-                style: GoogleFonts.sora(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.text,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                errorMessage!,
-                textAlign: TextAlign.center,
-                style: GoogleFonts.sora(fontSize: 13, color: AppColors.muted),
-              ),
-              const SizedBox(height: 20),
-              ElevatedButton.icon(
-                onPressed: fetchProjects,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Try again'),
-              ),
-            ],
-          ),
-        ),
+      return ErrorStateView(
+        message: errorMessage!,
+        onRetry: fetchProjects,
       );
     }
 
     if (projects.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.folder_open_outlined, size: 56, color: AppColors.slate),
-            const SizedBox(height: 12),
-            Text(
-              'No projects found.',
-              style: GoogleFonts.sora(fontSize: 13, color: AppColors.muted),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: fetchProjects,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Refresh'),
-            ),
-          ],
-        ),
+      return EmptyStateView(
+        icon: Icons.folder_open_outlined,
+        title: 'No projects found',
+        body: 'Projects you have been given access to will appear here.',
+        onRetry: fetchProjects,
       );
     }
 

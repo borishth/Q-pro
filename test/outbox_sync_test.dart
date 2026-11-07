@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 import 'package:q_pro/core/models/permissions.dart';
@@ -91,7 +93,7 @@ void main() {
     isOnline.value = true;
     api = FakeInfriveApi();
     OutboxSync.resetForTesting();
-    OutboxSync.init(api, FrappeClient('http://fake.invalid/'));
+    OutboxSync.init(api);
   });
 
   tearDown(() async {
@@ -262,6 +264,46 @@ void main() {
 
     final jobs = await OutboxDatabase.instance.uploadJobsForDraft('local-1');
     expect(jobs, hasLength(1), reason: 'upload must stay queued until save gives it a server name');
+  });
+
+  test('an upload is attached to the submission the server named', () async {
+    // The whole point of owning the upload call instead of using the
+    // SDK's: the file has to arrive tied to its Form Submission, or
+    // `files.download` has nothing to authorize and refuses everyone but
+    // the uploader — an approver then sees a broken image.
+    final file = File('${Directory.systemTemp.path}/outbox-upload-test.jpg');
+    await file.writeAsBytes(const [1, 2, 3]);
+    addTearDown(() => file.existsSync() ? file.deleteSync() : null);
+
+    String? gotSubmission;
+    OutboxSync.resetForTesting();
+    OutboxSync.init(
+      api,
+      upload: (f, {required String submission}) async {
+        gotSubmission = submission;
+        return '/api/method/infrive_app.api.files.download?file=abc&filename=a.jpg';
+      },
+    );
+
+    await OutboxDatabase.instance.insertDraft(
+      localId: 'local-1',
+      form: 'FORM-1',
+      answers: const {},
+    );
+    api.queueSave(() => _fakeSubmission('SUB-00100'));
+    await OutboxDatabase.instance.enqueueIfAbsent('save', 'local-1');
+    await OutboxDatabase.instance.enqueueUpload('local-1', 'photo', file.path);
+    api.queueSave(() => _fakeSubmission('SUB-00100'));
+
+    await OutboxSync.instance.drainForTesting();
+
+    expect(gotSubmission, 'SUB-00100');
+    final draft = await OutboxDatabase.instance.getDraft('local-1');
+    expect(
+      (draft!['answers_json'] as String).contains('files.download'),
+      isTrue,
+      reason: 'the returned file_url must land in the answer',
+    );
   });
 
   test('a drained queue stamps the draft as synced so it stays listed as done', () async {

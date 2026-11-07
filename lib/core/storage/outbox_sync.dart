@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 
 import '../network/app_errors.dart';
+import '../network/file_upload.dart';
 import '../network/infrive_api.dart';
 import '../services/connectivity_service.dart';
 import 'outbox_db.dart';
@@ -23,13 +24,18 @@ enum _JobOutcome { handled, deferred, paused }
 /// *other* drafts still get a turn — satisfying "different submissions
 /// may sync in parallel" without actually firing concurrent requests.
 class OutboxSync {
-  OutboxSync._(this._api, this._client);
+  OutboxSync._(this._api, this._upload);
 
   static OutboxSync? _instance;
   static OutboxSync get instance => _instance!;
 
-  static void init(InfriveApi api, FrappeClient client) {
-    _instance ??= OutboxSync._(api, client);
+  /// [upload] is swappable so tests can drive the upload path without a
+  /// network; production always takes the default.
+  static void init(
+    InfriveApi api, {
+    AttachmentUploader upload = uploadAttachment,
+  }) {
+    _instance ??= OutboxSync._(api, upload);
   }
 
   /// Drops the singleton so the next [init] builds a fresh instance — for
@@ -40,7 +46,7 @@ class OutboxSync {
   }
 
   final InfriveApi _api;
-  final FrappeClient _client;
+  final AttachmentUploader _upload;
   final _db = OutboxDatabase.instance;
   final ValueNotifier<int> pendingCount = ValueNotifier<int>(0);
 
@@ -199,16 +205,7 @@ class OutboxSync {
               return _JobOutcome.handled;
             }
 
-            final uploaded = await _client.attachment.uploadFile(
-              file,
-              doctype: 'Form Submission',
-              docname: serverName,
-            );
-            final uploadedUrl = uploaded['file_url']?.toString();
-            if (uploadedUrl == null || uploadedUrl.isEmpty) {
-              throw Exception('Upload did not return a file URL.');
-            }
-            url = uploadedUrl;
+            url = await _upload(file, submission: serverName);
             await _db.setJobResult(id, url);
           }
 

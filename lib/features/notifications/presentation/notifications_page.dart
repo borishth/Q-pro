@@ -7,6 +7,7 @@ import '../../../core/network/session.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/string_formatter.dart';
 import '../../../core/widgets/cached_data_banner.dart';
+import '../../../core/widgets/state_views.dart';
 import '../../forms/presentation/submission_detail_page.dart';
 import '../models/app_notification.dart';
 import '../notification_center.dart';
@@ -342,55 +343,15 @@ class _NotificationsPageState extends State<NotificationsPage> {
     );
   }
 
-  Widget _buildEmpty() => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.xxl),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.notifications_none_rounded,
-                size: 48,
-                color: AppColors.muted.withValues(alpha: 0.5),
-              ),
-              const SizedBox(height: AppSpacing.lg),
-              Text(
-                'No notifications yet',
-                style: GoogleFonts.sora(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.text,
-                ),
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              Text(
-                "You'll see updates here when a form you sent is approved "
-                'or sent back for rework.',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.sora(fontSize: 13, color: AppColors.muted),
-              ),
-            ],
-          ),
-        ),
+  Widget _buildEmpty() => const EmptyStateView(
+        icon: Icons.notifications_none_rounded,
+        title: 'No notifications yet',
+        body: "You'll see updates here when a form you sent is approved "
+            'or sent back for rework.',
       );
 
-  Widget _buildError() => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.xxl),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.error_outline, size: 48, color: AppColors.red),
-              const SizedBox(height: AppSpacing.lg),
-              Text(errorMessage!, textAlign: TextAlign.center),
-              const SizedBox(height: AppSpacing.xl),
-              FilledButton.icon(
-                onPressed: fetchNotifications,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Try again'),
-              ),
-            ],
-          ),
-        ),
+  Widget _buildError() => ErrorStateView(
+        message: errorMessage!,
+        onRetry: fetchNotifications,
       );
 }
